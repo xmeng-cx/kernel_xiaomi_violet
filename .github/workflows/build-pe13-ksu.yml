@@ -1,0 +1,232 @@
+name: Build violet PE13 KernelSU
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - pe13-ksu
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: violet-pe13-ksu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  DEFCONFIG: vendor/violet-perf_defconfig
+  KSU_VERSION: v0.9.5
+  KBUILD_BUILD_USER: Edison
+  KBUILD_BUILD_HOST: GitHub-Actions
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: 娓呯悊 Runner 纾佺洏
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo apt-get clean
+          df -h
+
+      - name: 鎷夊彇鍐呮牳婧愮爜
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: 瀹夎缂栬瘧渚濊禆
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            clang \
+            cpio \
+            device-tree-compiler \
+            flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            git \
+            libelf-dev \
+            libssl-dev \
+            lld \
+            llvm \
+            make \
+            python3 \
+            unzip \
+            wget \
+            zip \
+            zstd
+
+          clang --version
+          ld.lld --version
+          aarch64-linux-gnu-gcc --version
+
+      - name: 閰嶇疆 ccache
+        run: |
+          ccache --max-size=2G
+          ccache --zero-stats
+
+      - name: 涓嬭浇 KernelSU v0.9.5
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -d KernelSU ]; then
+            curl -LSs \
+              "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+              | bash -s "${KSU_VERSION}"
+          fi
+
+          test -d KernelSU
+
+      - name: 妫€鏌ユ墜鍔?Hook
+        shell: bash
+        run: |
+          set -e
+
+          grep -q "CONFIG_KSU=y" \
+            arch/arm64/configs/vendor/violet-perf_defconfig
+
+          grep -R "ksu_handle_execveat" fs/exec.c
+          grep -R "ksu_handle_faccessat" fs/open.c
+          grep -R "ksu_handle_vfs_read" fs/read_write.c
+
+          echo "KernelSU 閰嶇疆鍙婁富瑕?Hook 宸叉娴嬪埌"
+
+      - name: 鐢熸垚鍐呮牳閰嶇疆
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf out
+          mkdir -p out
+
+          make O=out \
+            ARCH=arm64 \
+            "${DEFCONFIG}"
+
+          echo "========== KernelSU config =========="
+          grep -E "CONFIG_KSU|CONFIG_KPROBES|CONFIG_MODULES" \
+            out/.config || true
+
+          grep -q "^CONFIG_KSU=y" out/.config
+
+      - name: 缂栬瘧鍐呮牳
+        shell: bash
+        run: |
+          set -e
+          set -o pipefail
+
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            Image.gz-dtb \
+            dtbo.img \
+            2>&1 | tee build.log
+
+      - name: 妫€鏌ョ紪璇戠粨鏋?        shell: bash
+        run: |
+          set -e
+
+          KERNEL_IMAGE="out/arch/arm64/boot/Image.gz-dtb"
+          DTBO_IMAGE="out/arch/arm64/boot/dtbo.img"
+
+          test -f "${KERNEL_IMAGE}"
+          test -s "${KERNEL_IMAGE}"
+
+          test -f "${DTBO_IMAGE}"
+          test -s "${DTBO_IMAGE}"
+
+          ls -lh "${KERNEL_IMAGE}" "${DTBO_IMAGE}"
+          ccache --show-stats
+
+      - name: 鍒朵綔 AnyKernel3 鍒锋満鍖?        shell: bash
+        run: |
+          set -e
+
+          rm -rf AnyKernel3 dist
+
+          git clone \
+            --depth=1 \
+            --branch sixteen \
+            https://github.com/Joker-V2/AnyKernel3.git \
+            AnyKernel3
+
+          rm -f \
+            AnyKernel3/Image \
+            AnyKernel3/Image.gz \
+            AnyKernel3/Image.gz-dtb \
+            AnyKernel3/dtbo.img
+
+          cp \
+            out/arch/arm64/boot/Image.gz-dtb \
+            AnyKernel3/Image.gz-dtb
+
+          cp \
+            out/arch/arm64/boot/dtbo.img \
+            AnyKernel3/dtbo.img
+
+          mkdir -p dist
+
+          BUILD_DATE="$(date -u +%Y%m%d-%H%M)"
+          ZIP_NAME="violet-PE13-KernelSU-${KSU_VERSION}-${BUILD_DATE}.zip"
+
+          cd AnyKernel3
+
+          zip -r9 "../dist/${ZIP_NAME}" . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x "README.md"
+
+          cd ..
+
+          sha256sum "dist/${ZIP_NAME}" \
+            | tee "dist/${ZIP_NAME}.sha256"
+
+          ls -lh dist
+
+      - name: 涓婁紶鍒锋満鍖?        uses: actions/upload-artifact@v4
+        with:
+          name: violet-PE13-KernelSU-${{ github.run_number }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 缂栬瘧澶辫触鏃朵笂浼犳棩蹇?        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: violet-build-log-${{ github.run_number }}
+          path: |
+            build.log
+            out/.config
+          if-no-files-found: ignore
+          retention-days: 7
