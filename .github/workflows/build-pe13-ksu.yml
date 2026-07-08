@@ -93,7 +93,7 @@ jobs:
             "${DEFCONFIG}"
 
           echo "========== Kernel config =========="
-          grep -E "CONFIG_KPROBES|CONFIG_MODULES" \
+          grep -E "CONFIG_KPROBES|CONFIG_MODULES|CONFIG_BUILD_ARM64_DT_OVERLAY" \
             out/.config || true
 
       - name: Build kernel
@@ -118,8 +118,31 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             Image.gz-dtb \
-            dtbo.img \
             2>&1 | tee build.log
+
+      - name: Build dtbo
+        shell: bash
+        run: |
+          set -e
+          set -o pipefail
+
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            dtbs \
+            2>&1 | tee -a build.log
 
       - name: Check build result
         shell: bash
@@ -127,15 +150,14 @@ jobs:
           set -e
 
           KERNEL_IMAGE="out/arch/arm64/boot/Image.gz-dtb"
-          DTBO_IMAGE="out/arch/arm64/boot/dtbo.img"
+          DTBO_IMAGE="out/arch/arm64/boot/dts/xiaomi/violet-sm6150-overlay.dtbo"
 
           test -f "${KERNEL_IMAGE}"
           test -s "${KERNEL_IMAGE}"
 
-          test -f "${DTBO_IMAGE}"
-          test -s "${DTBO_IMAGE}"
-
-          ls -lh "${KERNEL_IMAGE}" "${DTBO_IMAGE}"
+          ls -lh "${KERNEL_IMAGE}"
+          ls -lh "${DTBO_IMAGE}" || echo "DTBO not found, checking other locations..."
+          find out/ -name "*.dtbo" -type f 2>/dev/null | head -5
           ccache --show-stats
 
       - name: Create AnyKernel3 zip
@@ -161,9 +183,13 @@ jobs:
             out/arch/arm64/boot/Image.gz-dtb \
             AnyKernel3/Image.gz-dtb
 
-          cp \
-            out/arch/arm64/boot/dtbo.img \
-            AnyKernel3/dtbo.img
+          DTBO_FILE=$(find out/ -name "*violet*overlay*.dtbo" -type f | head -1)
+          if [ -n "${DTBO_FILE}" ]; then
+            cp "${DTBO_FILE}" AnyKernel3/dtbo.img
+            echo "Copied DTBO: ${DTBO_FILE}"
+          else
+            echo "Warning: DTBO file not found"
+          fi
 
           mkdir -p dist
 
